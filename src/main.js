@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import EasyStar from 'easystarjs';
+import nipplejs from 'nipplejs';
 
 // ─── CONSTANTS ───────────────────────────────────────────────
 const TILE             = 32;
@@ -65,6 +66,63 @@ const MAZE_TEMPLATE = [
   [1,0,1,1,1,1,1,1,0,1,1,1,0,1,1,1,1,1,1,0,1],
   [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
 ];
+
+const MOBILE_MAX_WIDTH = 768;
+const JOYSTICK_SIZE = 120;
+const JOYSTICK_COLOR = '#39ffcc';
+const JOYSTICK_OPACITY = 0.78;
+
+const JOYSTICK_DIRECTION_MAP = {
+  up:    { x: 0, y: -1 },
+  down:  { x: 0, y:  1 },
+  left:  { x: -1, y: 0 },
+  right: { x:  1, y: 0 },
+};
+
+function isMobileDevice() {
+  const ua = navigator.userAgent || navigator.vendor || window.opera || '';
+  const mobileUA = /Mobi|Android|iPhone|iPad|iPod|IEMobile|Opera Mini|Windows Phone/i;
+  return window.innerWidth < MOBILE_MAX_WIDTH || mobileUA.test(ua);
+}
+
+function createJoystickContainer() {
+  const wrapper = document.createElement('div');
+  wrapper.id = 'mobile-joystick-wrapper';
+  Object.assign(wrapper.style, {
+    position: 'fixed',
+    left: '50%',
+    bottom: '18px',
+    transform: 'translateX(-50%)',
+    width: `${JOYSTICK_SIZE + 20}px`,
+    height: `${JOYSTICK_SIZE + 20}px`,
+    borderRadius: '50%',
+    background: 'rgba(0, 0, 0, 0.96)',
+    border: '2px solid rgba(57, 255, 204, 0.55)',
+    boxShadow: '0 0 20px rgba(57,255,204,0.25)',
+    zIndex: '1200',
+    pointerEvents: 'auto',
+    touchAction: 'none',
+    opacity: JOYSTICK_OPACITY.toString(),
+    transition: 'opacity 200ms ease, transform 200ms ease',
+    display: 'none',
+    overflow: 'hidden',
+  });
+  document.body.appendChild(wrapper);
+  return wrapper;
+}
+
+function joystickDataToDir(data) {
+  if (!data || !data.direction || data.distance < 16) return { x: 0, y: 0 };
+  const angle = data.direction.angle;
+  if (JOYSTICK_DIRECTION_MAP[angle]) return JOYSTICK_DIRECTION_MAP[angle];
+  if (data.vector) {
+    const { x, y } = data.vector;
+    return Math.abs(x) > Math.abs(y)
+      ? { x: x > 0 ? 1 : -1, y: 0 }
+      : { x: 0, y: y > 0 ? 1 : -1 };
+  }
+  return { x: 0, y: 0 };
+}
 
 // ─── SOUND ENGINE ────────────────────────────────────────────
 // All audio is synthesised with Web Audio API — no files required.
@@ -314,6 +372,12 @@ class GameScene extends Phaser.Scene {
     });
     // AudioContext requires a prior user gesture — start BGM on first keypress.
     this.input.keyboard.once('keydown', () => sound.startBGM());
+
+    // Mobile joystick support
+    this.joystickDirection = { x: 0, y: 0 };
+    this.setupMobileJoystick();
+    this.events.on('shutdown', () => this.shutdownJoystick());
+    this.events.on('destroy', () => this.shutdownJoystick());
   }
 
   // ── initPellets ────────────────────────────────────────────
@@ -668,11 +732,95 @@ class GameScene extends Phaser.Scene {
   handleInput() {
     const k   = this.keys;
     const inv = this.activeDebuff?.type === 'invert';
+    const joy = this.joystickDirection;
 
-    if      (k.W.isDown || k.UP.isDown)    this.pac.nextDir = inv ? { x:0, y:1  } : { x:0, y:-1 };
-    else if (k.S.isDown || k.DOWN.isDown)  this.pac.nextDir = inv ? { x:0, y:-1 } : { x:0, y:1  };
-    else if (k.A.isDown || k.LEFT.isDown)  this.pac.nextDir = inv ? { x:1, y:0  } : { x:-1, y:0 };
-    else if (k.D.isDown || k.RIGHT.isDown) this.pac.nextDir = inv ? { x:-1, y:0 } : { x:1,  y:0 };
+    const rawDir = joy?.x || joy?.y
+      ? joy
+      : k.W.isDown || k.UP.isDown    ? { x: 0, y: -1 }
+      : k.S.isDown || k.DOWN.isDown  ? { x: 0, y:  1 }
+      : k.A.isDown || k.LEFT.isDown  ? { x: -1, y: 0 }
+      : k.D.isDown || k.RIGHT.isDown ? { x: 1, y:  0 }
+      : null;
+
+    if (!rawDir) return;
+
+    const nextDir = inv ? { x: -rawDir.x, y: -rawDir.y } : rawDir;
+    this.pac.nextDir = nextDir;
+  }
+
+  setupMobileJoystick() {
+    this.joystickContainer = createJoystickContainer();
+    this.joystickManager = null;
+    this.updateJoystickVisibility();
+    this.handleJoystickResize = () => this.updateJoystickVisibility();
+    window.addEventListener('resize', this.handleJoystickResize);
+  }
+
+  updateJoystickVisibility() {
+    if (isMobileDevice()) {
+      this.showJoystick();
+    } else {
+      this.hideJoystick();
+    }
+  }
+
+  showJoystick() {
+    if (!this.joystickContainer) return;
+    this.joystickContainer.style.display = 'block';
+    if (!this.joystickManager) this.createJoystickManager();
+  }
+
+  hideJoystick() {
+    if (this.joystickContainer) this.joystickContainer.style.display = 'none';
+    this.joystickDirection = { x: 0, y: 0 };
+  }
+
+  createJoystickManager() {
+    if (!this.joystickContainer) return;
+
+    this.joystickManager = nipplejs.create({
+      zone: this.joystickContainer,
+      mode: 'static',
+      position: { left: `${(JOYSTICK_SIZE + 20) / 2}px`, top: `${(JOYSTICK_SIZE + 20) / 2}px` },
+      size: JOYSTICK_SIZE,
+      color: {
+        front: JOYSTICK_COLOR,
+        back: 'rgba(0,0,0,0)',
+      },
+      threshold: 0.05,
+      restOpacity: 0.8,
+      dynamicPage: false,
+      lockX: false,
+      lockY: false,
+      fadeTime: 150,
+      shape: 'circle',
+      maxNumberOfJoysticks: 1,
+      catchDistance: 0,
+    });
+
+    this.joystickManager.on('start', () => sound.startBGM());
+    this.joystickManager.on('move', (evt) => this.onJoystickMove(evt.data));
+    this.joystickManager.on('end', () => this.onJoystickEnd());
+  }
+
+  onJoystickMove(data) {
+    this.joystickDirection = joystickDataToDir(data);
+  }
+
+  onJoystickEnd() {
+    this.joystickDirection = { x: 0, y: 0 };
+  }
+
+  shutdownJoystick() {
+    window.removeEventListener('resize', this.handleJoystickResize);
+    if (this.joystickManager) {
+      this.joystickManager.destroy();
+      this.joystickManager = null;
+    }
+    if (this.joystickContainer?.parentNode) {
+      this.joystickContainer.parentNode.removeChild(this.joystickContainer);
+      this.joystickContainer = null;
+    }
   }
 
   // ── updatePacMan ───────────────────────────────────────────
