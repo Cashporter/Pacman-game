@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "easystarjs": "^0.4.4",
+    "nipplejs": "^1.0.2",
     "phaser": "^3.80.1"
   },
   "devDependencies": {
